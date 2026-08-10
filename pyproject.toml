@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-llm-router"
+version = "0.1.0"
+description = "Multi-provider LLM router with LiteLLM and Optus AI Foundation support."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Sohel Arnool" }
+]
+dependencies = [
+  "litellm>=1.40.0",
+  "optus-ai @ git+https://optus.gitlab-dedicated.com/Optus/GroupIT/TechFoundations/OptusAIFoundations/cde-optus-ai-foundation-frontend.git@optus_ai_sdk#subdirectory=optus-ai"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ai_llm_router*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
