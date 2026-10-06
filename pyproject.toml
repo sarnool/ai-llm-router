@@ -1,31 +1,26 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-llm-router"
 version = "0.1.0"
-description = "Multi-provider LLM router with LiteLLM and Optus AI Foundation support."
+description = "A standalone Python SDK for routing chat-completion requests to LLM providers and gateways."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [
-  { name = "Sohel Arnool" }
-]
 dependencies = [
-  "litellm>=1.40.0",
-  "optus-ai @ git+https://optus.gitlab-dedicated.com/Optus/GroupIT/TechFoundations/OptusAIFoundations/cde-optus-ai-foundation-frontend.git@optus_ai_sdk#subdirectory=optus-ai"
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
-test = [
-  "pytest>=8.0.0"
+litellm = [
+    "litellm",
+]
+dev = [
+    "build",
+    "pytest",
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["ai_llm_router*"]
-
-[tool.pytest.ini_options]
-addopts = "-ra"
-testpaths = ["tests"]

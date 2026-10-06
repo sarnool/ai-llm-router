@@ -1,300 +1,226 @@
-# ai-llm-router
+# AI LLM Router SDK
 
-A package-ready multi-provider LLM client that supports:
+A standalone Python chat-completion client configured explicitly through `LLMSettings`. The client supports LiteLLM-backed providers and direct HTTP gateways, with optional streaming, structured JSON output, and normalized response metadata.
 
-- `openai`
-- `anthropic`
-- `google`
-- `optusaifoundation`
+## Features
 
-It exposes `LLMSettings`, `LLMClient`, and `LLMCompletionResult`.
+- Explicit caller-supplied settings; no configuration or credentials are loaded from environment variables or application services.
+- LiteLLM transport for supported providers, or direct HTTP (`provider_type="custom"`).
+- API-key, caller-supplied authorization-header, and OAuth client-credentials authentication.
+- Streaming text and metadata callbacks.
+- Structured JSON output with provider JSON-schema support or schema instructions in the prompt.
+- Response, usage, and timing metadata; sensitive authentication and cookie headers are redacted.
 
-`LLMClient` is the runtime object you call for requests. Use `complete(...)` for both text and structured JSON workflows.
+## Requirements
 
-## Install (editable during development)
+- Python 3.10 or later.
+- `requests` is required to import the client and for direct HTTP/OAuth requests.
+- The optional `litellm` dependency is required when using a non-custom provider.
 
-```bash
-pip install -e .[test]
-```
+The project is not yet published as an installable release. Local editable installation and test dependencies are documented under [Local development and testing](#local-development-and-testing). Published SDK users will only need runtime dependencies; they will not need the development extra.
 
-## Usage
+## Quick start
+
+The example prompts securely for an API key and makes a real provider call. It may incur provider charges. To use another LiteLLM provider such as Gemini, set `provider` and `model` to that provider's LiteLLM identifiers.
 
 ```python
-from ai_llm_router import LLMClient, LLMCompletionResult, LLMSettings
+from getpass import getpass
 
-settings = LLMSettings.from_env()
+from ai_llm_router.llm_client import LLMClient, LLMSettings
+
+api_key = getpass("Provider API key: ")
+settings = LLMSettings(
+    provider="openai",
+    model="gpt-4.1-mini",
+    provider_type="litellm",
+    api_key=api_key,  # Supply a value managed by your application.
+    streaming=True,
+    supports_streaming=True,
+    supports_response_schema=True,
+    max_tokens=1200,
+    temperature=0.2,
+    timeout_seconds=90,
+)
 client = LLMClient(settings)
 
-
-def handle_delta(chunk: str) -> None:
-    print(chunk, end="", flush=True)
-
-
-result: LLMCompletionResult | None = client.complete(
-    prompt="Extract the person details: John Smith is 34 years old and works as a software engineer in Sydney.",
-    system="you are a helpful Assistant.",
+response = client.complete(
+    "Return a short greeting.",
+    system="You are a concise assistant.",
     response_schema={
         "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-            "job_title": {"type": "string"},
-            "city": {"type": "string"},
-        },
-        "required": ["name", "age", "job_title", "city"],
+        "properties": {"greeting": {"type": "string"}},
+        "required": ["greeting"],
         "additionalProperties": False,
     },
-    stream=True,
-    on_delta=handle_delta,
+    on_delta=lambda text: print(text, end="", flush=True),
 )
 
-if result is None:
-    raise RuntimeError("Request failed")
-
-print("\n\nParsed:", result.parsed)
-print("Metadata:", result.metadata)
+print(response.parsed)    # Parsed JSON object
+print(response.metadata)  # Normalized response and usage metadata
 ```
 
-## API Reference
+The example assumes the package has been installed. Tests mock provider responses and do not make live provider calls.
 
-### `LLMClient.complete(...)`
+### Direct HTTP gateway
 
-Call:
+Set `provider_type="custom"` and provide `gateway_url` to use the direct HTTP transport. The endpoint is expected to accept a chat-completions-style JSON request. `requests` is used for both HTTP and OAuth client-credentials token requests.
 
-```python
-result = client.complete(
-    prompt,
-    system="",
-    response_schema=None,
-    response_format=None,
-    response_schema_name=None,
-    strict_json_schema=None,
-    json_output=None,
-    stream=None,
-    on_delta=None,
-)
-```
+## Public API
 
-Parameters:
+### `LLMSettings`
 
-- `prompt` (str, required): user prompt text.
-- `system` (str): system instruction.
-- `response_schema` (dict): convenience schema input; converted to `response_format` json_schema shape.
-- `response_format` (dict): native provider response format payload.
-- `response_schema_name` (str): schema name used when wrapping `response_schema`.
-- `strict_json_schema` (bool): strict schema mode override.
-- `json_output` (bool): force JSON parsing even without schema.
-- `stream` (bool): stream tokens/chunks when supported.
-- `on_delta` (Callable[[str], None]): callback invoked for each streamed text chunk.
+`provider` and `model` are required. All other fields have library defaults and are not loaded from external configuration.
 
-Returns:
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `provider` | Required | Provider name; used to qualify the LiteLLM model name. |
+| `model` | Required | Model identifier sent with the completion request. |
+| `provider_type` | `"litellm"` | Selects transport. `"custom"` selects direct HTTP; all other values select LiteLLM. |
+| `api_key` | `""` | Explicit API key. |
+| `client_id` | `""` | OAuth client ID for client-credentials authentication. |
+| `client_secret` | `""` | OAuth client secret. |
+| `oauth_url` | `""` | OAuth token endpoint. |
+| `gateway_url` | `""` | Required for `custom`; optional LiteLLM `api_base`. |
+| `verify_ssl` | `True` | TLS certificate verification for direct HTTP and OAuth requests. |
+| `timeout_seconds` | `120.0` | Request timeout. |
+| `max_tokens` | `4000` | Default completion-token limit; can be overridden per call. |
+| `temperature` | `0.0` | Sampling temperature; `None` omits it from the provider request. |
+| `streaming` | `True` | Whether calls stream by default. |
+| `supports_streaming` | `True` | Capability guard; `False` disables streaming even if requested. |
+| `supports_response_schema` | `True` | Use provider JSON-schema formatting, or include schema instructions in the prompt when `False`. |
+| `extra_headers` | Empty dictionary | Extra request headers, including caller-managed authorization headers. |
 
-- `LLMCompletionResult | None`
-- `None` indicates failure; check `client.last_error`.
+### `LLMClient`
 
-For JSON-only use cases, call `complete(..., json_output=True)` and read `result.parsed`.
+Construct with a caller-created `LLMSettings` object. `enabled_with_reason()` returns `(enabled, reason)` after checking the model, endpoint, and available authentication inputs; it does not contact a provider.
 
-### `LLMCompletionResult`
+`complete(prompt, ...)` accepts these optional keyword arguments:
 
-Fields:
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `system` | `""` | Optional system message. |
+| `response_schema` | `None` | JSON schema for structured output. Its presence enables JSON parsing by default. |
+| `response_schema_name` | `"structured_response"` | Name attached to the provider JSON schema. |
+| `strict_json_schema` | `True` | Request strict schema output where supported. |
+| `json_output` | `None` | Defaults to `True` when a schema is provided; set `False` to return text without JSON parsing. |
+| `max_tokens` | `None` | Per-call override; otherwise uses `LLMSettings.max_tokens`. |
+| `headers` | `None` | Per-call HTTP headers merged over `LLMSettings.extra_headers`. |
+| `stream` | `None` | Per-call override; otherwise uses `LLMSettings.streaming`, subject to `supports_streaming`. |
+| `on_delta` | `None` | Callback receiving each non-empty streamed text fragment. |
+| `on_metadata` | `None` | Callback receiving a copy of metadata after provider success or failure. It is not called for pre-request argument validation errors. |
 
-- `provider`
-- `model`
-- `text`
-- `parsed`
-- `metadata`
-- `raw_response`
-- `used_streaming`
+### Response and errors
 
-`metadata` contains normalized run details (keys appear only when available from the provider):
+Successful calls return an `LLMResponse`:
 
-Common keys (non-streaming and streaming):
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `text` | `str` | Complete response text, assembled from the response or stream. |
+| `parsed` | `Any \| None` | Parsed JSON value when JSON output was requested; otherwise `None`. |
+| `raw_response` | `dict[str, Any]` | Provider response payload (or the last payload received in a stream). |
+| `metadata` | `dict[str, Any]` | Normalized request, response, timing, and usage details. |
 
-- `response_id`
-- `created`
-- `response_model`
-- `response_object`
-- `finish_reason`
-- `prompt_tokens`
-- `completion_tokens`
-- `total_tokens`
-- `input_tokens`
-- `output_tokens`
+Metadata includes provider/model, stream and response-format settings, request hyperparameters, and—when supplied by the transport/provider—request and response details, timing, finish reason, response identifiers, and token usage. Sensitive authorization, proxy-authorization, cookie, and set-cookie header values are redacted. Missing provider fields are omitted rather than synthesized.
 
-Detailed token keys (provider-dependent):
+The client also exposes `last_error`, `last_response_metadata`, `last_raw_response`, and `last_response_text`. The latter two retain the most recent successful response if a later call fails. Invalid arguments can raise `TypeError` or `ValueError`; transport, authentication, or invalid-response failures raise `LLMRequestError`.
 
-- `reasoning_tokens`
-- `text_tokens`
-- `prompt_text_tokens`
-- `prompt_audio_tokens`
-- `prompt_image_tokens`
-- `prompt_video_tokens`
-- `cached_prompt_tokens`
-- `prompt_cache_write_tokens`
-- `cache_read_input_tokens`
-- `tool_use_prompt_tokens`
+## Local development and testing
 
-OAIF keys (when returned by OAIF/gateway):
-
-- `request_id`
-- `apigee_message_id`
-- `correlation_id`
-- `dt_trace_id`
-- `oaif_cost_usd`
-- `cost_modifier_pct`
-- `duration_s`
-- `oaif_model`
-- `cache_read_tokens`
-- `cache_creation_tokens`
-
-Streaming-only aggregation keys:
-
-- `stream_chunk_count`
-- `first_chunk_id`
-- `first_chunk_created`
-- `first_chunk_object`
-- `first_chunk_model`
-- `last_chunk_id`
-- `last_chunk_created`
-- `last_chunk_object`
-- `last_chunk_model`
-
-Other optional keys:
-
-- `system_fingerprint`
-
-## Environment variables
-
-Start by copying the template:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell:
+The following setup is for contributors testing this repository. It installs the checkout in editable mode, along with LiteLLM and development tools; it is not an end-user installation command. Run it from the repository root using the Python environment you want to use for this project:
 
 ```powershell
-Copy-Item .env.example .env
+python.exe -m pip install -e ".[litellm,dev]"
 ```
 
-Then fill required values based on provider:
-
-- All providers: `LLM_PROVIDER`, `LLM_MODEL`
-- `openai`, `anthropic`, `google`: `LLM_API_KEY`
-- `optusaifoundation`: `LLM_CLIENT_ID`, `LLM_CLIENT_SECRET`
-
-Additional supported variables (optional unless noted):
-
-- `LLM_PROVIDER`
-- `LLM_MODEL`
-- `LLM_API_KEY` (for non-OAIF providers)
-- `LLM_CLIENT_ID` (OAIF)
-- `LLM_CLIENT_SECRET` (OAIF)
-- `LLM_OAUTH_URL` (optional OAIF)
-- `LLM_GATEWAY_URL` (optional)
-- `LLM_VERIFY_SSL` (`true`/`false`)
-- `LLM_TEMPERATURE`
-- `LLM_MAX_TOKENS`
-- `LLM_TIMEOUT_SECONDS`
-- `LLM_STREAMING` (`true`/`false`)
-- `LLM_STRICT_JSON_SCHEMA` (`true`/`false`)
-- `LLM_RESPONSE_SCHEMA_NAME`
-
-Set variables in your shell (examples):
-
-Use the command style for your shell:
-
-- Bash/zsh: `export ...`
-- PowerShell: `$env:...`
-- Windows cmd: `set ...`
-
-```bash
-export LLM_PROVIDER=openai
-export LLM_MODEL=gpt-4o-mini
-export LLM_API_KEY=your_api_key_here
-```
+The `litellm` extra is included so you can run real requests through LiteLLM providers. The `dev` extra installs tools such as `pytest` and `build`. For unit tests, the built-in `unittest` runner is sufficient:
 
 ```powershell
-$env:LLM_PROVIDER="openai"
-$env:LLM_MODEL="gpt-4o-mini"
-$env:LLM_API_KEY="your_api_key_here"
+python -m unittest discover -s tests/unit -v
 ```
 
-```cmd
-set LLM_PROVIDER=openai
-set LLM_MODEL=gpt-4o-mini
-set LLM_API_KEY=your_api_key_here
-```
+If your organization intercepts PyPI TLS and pip reports a certificate verification error, use your organization's approved package index or CA certificate, for example `python.exe -m pip install --cert "C:\path\to\corporate-ca.pem" -e ".[litellm,dev]"`. Do not disable certificate verification.
 
-For `optusaifoundation` instead of `LLM_API_KEY`:
+## Tests
+
+The unit tests mock provider responses; they do not make live network requests. The LiteLLM test uses a mocked module. Follow the local setup above before running the test command.
+
+## Live integration check
+
+The integration runner sends a real request to the configured provider. It can incur charges. Provide a key with `--api-key`, or omit it to enter the key through a hidden terminal prompt. For OAuth, pass `--client-id`, `--client-secret`, and `--oauth-url` instead. You can also repeat `--header NAME=VALUE` to set gateway-specific headers.
+
+Run the Python integration script from the project root. It prompts for an API key without echoing it if you don't pass `--api-key`:
 
 ```powershell
-$env:LLM_PROVIDER="optusaifoundation"
-$env:LLM_MODEL="your_oaif_model"
-$env:LLM_CLIENT_ID="your_client_id"
-$env:LLM_CLIENT_SECRET="your_client_secret"
+python tests/integration/run_real_llm_test.py --provider openai --model gpt-4.1-mini --prompt "Say hello in one sentence." --stream
 ```
 
-```cmd
-set LLM_PROVIDER=optusaifoundation
-set LLM_MODEL=your_oaif_model
-set LLM_CLIENT_ID=your_client_id
-set LLM_CLIENT_SECRET=your_client_secret
-```
+For direct HTTP, pass `--provider-type custom --gateway-url "https://your-gateway.example/v1/chat/completions"`. You can pass custom headers with `--header "X-Tenant=team-a"`; do not put secrets in commands that may be stored in shell history.
 
-To persist values for future `cmd` sessions, use `setx` (example):
+TLS certificate verification is enabled by default for direct HTTP and OAuth requests. Use `--no-verify-ssl` only when required for a controlled test environment with a self-signed certificate; disabling verification weakens connection security. `--verify-ssl` explicitly enables verification. These switches do not change TLS behavior for LiteLLM requests.
 
-```cmd
-setx LLM_PROVIDER optusaifoundation
-```
-
-Note: `setx` updates future terminals only. Open a new terminal to use the new value.
-
-## Run Example Manually
-
-After installing dependencies and setting env variables, run the demo from the project root:
-
-```bash
-python examples/streaming_schema_demo.py
-```
+`--provider-type` defaults to `litellm`, so omit it when connecting through LiteLLM, including Gemini. For example:
 
 ```powershell
-python .\examples\streaming_schema_demo.py
+python tests/integration/run_real_llm_test.py --provider gemini --model gemini-2.5-flash --prompt "Say hello in one sentence."
 ```
 
-```cmd
-python examples\streaming_schema_demo.py
-```
+Set `--provider-type custom` only when the script should send requests directly to an HTTP-compatible gateway; in that case, also pass `--gateway-url`.
 
-To test OAIF authentication only and fetch a token using `LLM_CLIENT_ID` / `LLM_CLIENT_SECRET`:
-
-```bash
-python examples/oaif_token_demo.py
-```
+Example using LiteLLM:
 
 ```powershell
-python .\examples\oaif_token_demo.py
+python tests/integration/run_real_llm_test.py --provider openai --model gpt-4.1-mini --prompt "Say hello in one sentence."
 ```
 
-```cmd
-python examples\oaif_token_demo.py
-```
+The script prompts for an API key if needed. To pass one explicitly, add `--api-key YOUR_KEY` (be aware command-line arguments may be saved in shell history). To use a direct HTTP gateway, add `--provider-type custom --gateway-url https://your-gateway.example/v1/chat/completions`. Add `--stream` to print output as it arrives, or `--response-schema '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}'` to request structured JSON.
 
-The token example prints only a masked token prefix, not the full bearer token.
+Install `requests` before running the script; install `litellm` as well when using the default LiteLLM transport. The direct HTTP integration runner still requires `requests`.
 
-## Run tests
+### Available arguments
 
-```bash
-pytest
-```
+| Argument | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `--prompt` | Yes | — | Prompt sent to the model. |
+| `--model` | Yes | — | Model ID. |
+| `--provider` | No | `openai` | Provider name; use `gemini` for Gemini models. |
+| `--provider-type` | No | `litellm` | Selects `litellm` or `custom` direct HTTP. |
+| `--api-key` | No | Secure prompt | API key. |
+| `--system` | No | Empty | Optional system message. |
+| `--gateway-url` | No | Empty | Gateway endpoint; required for custom HTTP. |
+| `--client-id` | No | Empty | OAuth client ID. |
+| `--client-secret` | No | Empty | OAuth client secret. |
+| `--oauth-url` | No | Empty | OAuth token endpoint. |
+| `--header NAME=VALUE` | No | — | Extra request header; repeat to add more. |
+| `--timeout-seconds` | No | `120` | Request timeout. |
+| `--verify-ssl` / `--no-verify-ssl` | No | `--verify-ssl` | Enable or disable TLS certificate verification for direct HTTP and OAuth requests. Disabling verification is not recommended and does not affect LiteLLM requests. |
+| `--max-tokens` | No | `4000` | Maximum completion tokens. |
+| `--temperature` | No | `0.0` | Sampling temperature. |
+| `--stream` | No | Off | Print response as it arrives. |
+| `--response-schema JSON` | No | None | JSON Schema object for structured output. |
+| `--no-response-schema-support` | No | Off | Put schema instructions in the prompt instead of using provider schema mode. |
 
-By default only import/smoke tests run. A live integration test is included and only runs when `LLM_RUN_LIVE_TEST=1`.
+### Understanding the output
 
-## Build wheel
+For a non-streaming request, the script prints `Response:` followed by the model's response text. If `--response-schema` was supplied, it also prints `Parsed JSON:` with the response parsed as a JSON value. The parsed value is convenient for applications to consume; the `Response:` section remains the original text returned by the model.
 
-```bash
-python -m pip install --upgrade build
-python -m build
-```
+After a successful request, `Metadata:` is printed as a JSON object. Common fields include:
 
-Artifacts are generated in `dist/`.
+| Metadata field | Meaning |
+| --- | --- |
+| `status` | `"ok"` means the provider call and response handling succeeded. |
+| `provider`, `model` | Provider and model configured for the call. |
+| `response_model` | Model name reported in the provider response, when supplied. |
+| `response_format_mode` | `"none"`, `"json_schema"`, or `"prompt_schema_instructions"`, describing how structured output was requested. |
+| `request_hyperparams` | Request settings such as maximum tokens and temperature. |
+| `latency_ms` | Request timing measured by the client, in milliseconds. |
+| `response_id`, `request_id` | Provider response/request identifiers, when available. |
+| `finish_reason` | Provider's reason for stopping generation, when available. |
+| `prompt_tokens`, `completion_tokens`, `input_tokens`, `output_tokens`, `total_tokens`, `reasoning_tokens` | Token usage reported by the provider. Some providers report only a subset or none. |
+| `chunk_count`, `time_to_first_chunk_ms` | Streaming information; present when the transport reports streamed chunks. |
+| `request_url`, `response_status_code` | Transport details when provided by the selected transport. |
+
+Metadata fields vary by provider and transport; absent fields are not necessarily errors. Header values for authorization, proxy authorization, cookies, and set-cookie are redacted. With `--stream`, text is printed as it arrives instead of under the `Response:` label; the metadata block is printed after the stream finishes. Request failures are printed to stderr as `LLM request failed: ...` and the script exits with a non-zero status. The script does not print a metadata block for failed requests.
+
+## Limitations
+
+Provider response formats and JSON-schema capabilities vary. Configure capability flags for the selected provider/model and validate behavior against it. LiteLLM is optional at runtime for the direct HTTP transport; consumers are responsible for installing and versioning dependencies appropriate to their deployment.
