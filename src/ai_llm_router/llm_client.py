@@ -31,8 +31,8 @@ class LLMSettings:
 	LiteLLM. No settings are loaded or inferred from the process environment.
 	"""
 
-	provider: str
-	model: str
+	provider: str = ""
+	model: str = ""
 	provider_type: str = "litellm"
 	api_key: str = ""
 	client_id: str = ""
@@ -40,10 +40,10 @@ class LLMSettings:
 	oauth_url: str = ""
 	gateway_url: str = ""
 	verify_ssl: bool = True
-	timeout_seconds: float = 120.0
-	max_tokens: int = 4000
-	temperature: float | None = 0.0
-	streaming: bool = True
+	timeout_seconds: float | None = None
+	max_tokens: int | None = None
+	temperature: float | None = None
+	stream: bool = True
 	supports_streaming: bool = True
 	supports_response_schema: bool = True
 	extra_headers: dict[str, str] = field(default_factory=dict)
@@ -75,10 +75,13 @@ class LLMClient:
 		self._oauth_access_token = ""
 		self._oauth_access_token_expires_at = 0.0
 
-	def enabled_with_reason(self) -> tuple[bool, str]:
+	def check_llm_configuration(self) -> tuple[bool, str]:
 		if not self.settings.model.strip():
 			return False, "A model name must be supplied in LLMSettings."
-		if self.settings.provider_type.strip().lower() == "custom" and not self.settings.gateway_url.strip():
+		is_custom_provider = self.settings.provider_type.strip().lower() == "custom"
+		if not is_custom_provider and not self.settings.provider.strip():
+			return False, "A provider name must be supplied for LiteLLM transport."
+		if is_custom_provider and not self.settings.gateway_url.strip():
 			return False, "gateway_url must be supplied for direct HTTP providers."
 		if self.settings.api_key.strip():
 			return True, "configured"
@@ -119,13 +122,15 @@ class LLMClient:
 		if wants_json and response_schema is None:
 			raise ValueError("response_schema is required when json_output is enabled")
 
-		requested_stream = self.settings.streaming if stream is None else bool(stream)
+		requested_stream = self.settings.stream if stream is None else bool(stream)
 		use_stream = requested_stream and self.settings.supports_streaming
 		normalized_schema = self._normalize_schema(response_schema) if response_schema is not None else None
-		request_headers = self._request_headers(headers or {})
+		is_custom_provider = self.settings.provider_type.strip().lower() == "custom"
+		request_headers = self._request_headers(headers or {}, include_api_key_auth=is_custom_provider)
 		messages: list[dict[str, str]] = []
 		if system.strip():
 			messages.append({"role": "system", "content": system})
+			
 		messages.append({"role": "user", "content": prompt})
 
 		response_format: dict[str, Any] | None = None
@@ -152,16 +157,19 @@ class LLMClient:
 			"model": self.settings.model,
 			"messages": messages,
 			"stream": use_stream,
-			"max_tokens": max(1, int(max_tokens if max_tokens is not None else self.settings.max_tokens)),
 		}
+		requested_max_tokens = max_tokens if max_tokens is not None else self.settings.max_tokens
+		if requested_max_tokens is not None:
+			request_body["max_tokens"] = max(1, int(requested_max_tokens))
 		if self.settings.temperature is not None:
 			request_body["temperature"] = float(self.settings.temperature)
+		
 		if response_format is not None:
 			request_body["response_format"] = response_format
 
 		started = time.perf_counter()
 		metadata: dict[str, Any] = {
-			"provider": self.settings.provider,
+			"provider": self.settings.provider or None,
 			"model": self.settings.model,
 			"stream": use_stream,
 			"supports_streaming": self.settings.supports_streaming,
@@ -176,7 +184,7 @@ class LLMClient:
 		raw_response: dict[str, Any] = {}
 		self.last_error = None
 		try:
-			if self.settings.provider_type.strip().lower() == "custom":
+			if is_custom_provider:
 				text, raw_response = self._request_http(
 					request_body, request_headers, use_stream, on_delta, metadata, started
 				)
@@ -184,10 +192,11 @@ class LLMClient:
 				text, raw_response = self._request_litellm(
 					request_body, request_headers, use_stream, on_delta, metadata, started
 				)
-
 			self._extract_response_metadata(metadata, raw_response)
 			if not text:
 				text = self._extract_text(raw_response)
+			if text == '(none)':
+				text = ''
 			parsed = self._parse_json(text) if wants_json else None
 			self.last_response_text = text
 			self.last_raw_response = raw_response
@@ -206,13 +215,18 @@ class LLMClient:
 				raise
 			raise LLMRequestError(self.last_error) from exc
 
-	def _request_headers(self, call_headers: dict[str, str]) -> dict[str, str]:
+	def _request_headers(
+		self,
+		call_headers: dict[str, str],
+		*,
+		include_api_key_auth: bool = True,
+	) -> dict[str, str]:
 		headers = {str(key): str(value) for key, value in self.settings.extra_headers.items()}
 		headers.update({str(key): str(value) for key, value in call_headers.items()})
 		if not self._header(headers, "content-type"):
 			headers["Content-Type"] = "application/json"
 		if not self._header(headers, "authorization"):
-			if self.settings.api_key.strip():
+			if self.settings.api_key.strip() and include_api_key_auth:
 				headers["Authorization"] = f"Bearer {self.settings.api_key.strip()}"
 			elif self.settings.client_id.strip() and self.settings.client_secret.strip() and self.settings.oauth_url.strip():
 				headers["Authorization"] = f"Bearer {self._get_oauth_access_token()}"
@@ -242,14 +256,15 @@ class LLMClient:
 		if not (self.settings.oauth_url.strip() and self.settings.client_id.strip() and self.settings.client_secret.strip()):
 			raise ValueError("oauth_url, client_id, and client_secret are required for OAuth")
 
-		response = requests.post(
-			self.settings.oauth_url,
-			data={"grant_type": "client_credentials"},
-			auth=(self.settings.client_id, self.settings.client_secret),
-			headers={"Content-Type": "application/x-www-form-urlencoded"},
-			timeout=self.settings.timeout_seconds,
-			verify=self.settings.verify_ssl,
-		)
+		request_options: dict[str, Any] = {
+			"data": {"grant_type": "client_credentials"},
+			"auth": (self.settings.client_id, self.settings.client_secret),
+			"headers": {"Content-Type": "application/x-www-form-urlencoded"},
+			"verify": self.settings.verify_ssl,
+		}
+		if self.settings.timeout_seconds is not None:
+			request_options["timeout"] = self.settings.timeout_seconds
+		response = requests.post(self.settings.oauth_url, **request_options)
 		if response.status_code >= 400:
 			raise LLMRequestError(f"OAuth token request failed with HTTP {response.status_code}")
 		payload = response.json() if response.content else {}
@@ -282,14 +297,15 @@ class LLMClient:
 		url = self._request_url()
 		metadata["request_url"] = url
 		metadata["request_headers"] = self._safe_headers(headers)
-		response = requests.post(
-			url,
-			json=body,
-			headers=headers,
-			stream=stream,
-			timeout=self.settings.timeout_seconds,
-			verify=self.settings.verify_ssl,
-		)
+		request_options: dict[str, Any] = {
+			"json": body,
+			"headers": headers,
+			"stream": stream,
+			"verify": self.settings.verify_ssl,
+		}
+		if self.settings.timeout_seconds is not None:
+			request_options["timeout"] = self.settings.timeout_seconds
+		response = requests.post(url, **request_options)
 		metadata["response_status_code"] = response.status_code
 		metadata["response_headers"] = self._safe_headers(dict(response.headers))
 		metadata["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
@@ -323,7 +339,7 @@ class LLMClient:
 		except Exception as exc:
 			raise LLMRequestError("LiteLLM is required for non-custom providers") from exc
 
-		provider = self.settings.provider.strip()
+		provider = (self.settings.provider or "").strip()
 		model = self.settings.model.strip()
 		if provider and provider.lower() != "system_supplied" and not model.startswith(f"{provider}/"):
 			model = f"{provider}/{model}"
@@ -331,9 +347,11 @@ class LLMClient:
 			"model": model,
 			"messages": body["messages"],
 			"stream": stream,
-			"max_tokens": body["max_tokens"],
-			"timeout": self.settings.timeout_seconds,
 		}
+		if self.settings.timeout_seconds is not None:
+			kwargs["timeout"] = self.settings.timeout_seconds
+		if "max_tokens" in body:
+			kwargs["max_tokens"] = body["max_tokens"]
 		if "temperature" in body:
 			kwargs["temperature"] = body["temperature"]
 		if self.settings.gateway_url.strip():

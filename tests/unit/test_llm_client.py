@@ -21,6 +21,7 @@ except ModuleNotFoundError:
     sys.modules["requests"] = requests_stub
 
 from ai_llm_router import llm_client as sdk
+from ai_llm_router import LLMClient, LLMRequestError, LLMResponse, LLMSettings
 
 
 class _FakeResponse:
@@ -40,6 +41,12 @@ class _FakeResponse:
 
 
 class LLMClientTests(unittest.TestCase):
+    def test_public_sdk_api_is_exported_from_package(self) -> None:
+        self.assertIs(LLMClient, sdk.LLMClient)
+        self.assertIs(LLMRequestError, sdk.LLMRequestError)
+        self.assertIs(LLMResponse, sdk.LLMResponse)
+        self.assertIs(LLMSettings, sdk.LLMSettings)
+
     def _custom_client(self) -> sdk.LLMClient:
         return sdk.LLMClient(
             sdk.LLMSettings(
@@ -48,7 +55,7 @@ class LLMClientTests(unittest.TestCase):
                 model="test-model",
                 api_key="secret-key",
                 gateway_url="https://example.invalid/chat/completions",
-                streaming=False,
+                stream=False,
             )
         )
 
@@ -77,10 +84,24 @@ class LLMClientTests(unittest.TestCase):
                 api_key="test-key",
             )
         )
-        enabled, reason = client.enabled_with_reason()
+        enabled, reason = client.check_llm_configuration()
 
         self.assertFalse(enabled)
         self.assertIn("gateway_url", reason)
+
+    def test_custom_transport_does_not_require_provider_name(self) -> None:
+        client = sdk.LLMClient(
+            sdk.LLMSettings(
+                model="test-model",
+                provider_type="custom",
+                api_key="test-key",
+                gateway_url="https://example.invalid/chat/completions",
+            )
+        )
+
+        enabled, reason = client.check_llm_configuration()
+
+        self.assertTrue(enabled, reason)
 
     def test_custom_non_streaming_returns_parsed_output_and_metadata(self) -> None:
         payload = {
@@ -110,6 +131,9 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.metadata["request_headers"]["Authorization"], "[REDACTED]")
         self.assertEqual(metadata_events, [result.metadata])
         self.assertEqual(post.call_args.kwargs["json"]["model"], "test-model")
+        self.assertNotIn("max_tokens", post.call_args.kwargs["json"])
+        self.assertNotIn("temperature", post.call_args.kwargs["json"])
+        self.assertNotIn("timeout", post.call_args.kwargs)
         self.assertFalse(post.call_args.kwargs["stream"])
 
     def test_custom_streaming_emits_deltas_and_stream_metadata(self) -> None:
@@ -121,7 +145,7 @@ class LLMClientTests(unittest.TestCase):
         response = _FakeResponse({}, lines=lines)
         client = self._custom_client()
         received: list[str] = []
-        client.settings.streaming = True
+        client.settings.stream = True
 
         with patch.object(sdk.requests, "post", return_value=response) as post:
             result = client.complete("say hello", json_output=False, on_delta=received.append)
@@ -154,6 +178,10 @@ class LLMClientTests(unittest.TestCase):
         self.assertEqual(result.metadata["response_id"], "lite-response")
         self.assertEqual(calls[0]["model"], "openai/test-model")
         self.assertEqual(calls[0]["api_key"], "explicit-key")
+        self.assertNotIn("max_tokens", calls[0])
+        self.assertNotIn("temperature", calls[0])
+        self.assertNotIn("timeout", calls[0])
+        self.assertNotIn("Authorization", calls[0]["extra_headers"])
 
 
 if __name__ == "__main__":

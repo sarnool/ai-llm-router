@@ -10,12 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
+    "litellm",
 ]
 
 [project.optional-dependencies]
-litellm = [
-    "litellm",
-]
 dev = [
     "build",
     "pytest",
@@ -24,3 +22,6 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["ai_llm_router*"]
+
+[tool.setuptools.package-data]
+ai_llm_router = ["py.typed"]
